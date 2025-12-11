@@ -1,0 +1,474 @@
+# Actuator & Metrics Annotations
+
+## Monitoring and Managing Your Application
+
+---
+
+## Overview
+
+| Annotation | Purpose |
+|------------|---------|
+| `@Endpoint` | Custom actuator endpoint |
+| `@ReadOperation` | GET operation on endpoint |
+| `@WriteOperation` | POST operation on endpoint |
+| `@DeleteOperation` | DELETE operation on endpoint |
+| `@Timed` | Record method timing |
+| `@Counted` | Count method invocations |
+
+---
+
+## Built-in Actuator Endpoints
+
+### Enable Actuator
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-actuator</artifactId>
+</dependency>
+```
+
+### Common Endpoints
+
+```properties
+# application.properties
+management.endpoints.web.exposure.include=health,info,metrics,env,beans
+
+# Or expose all
+management.endpoints.web.exposure.include=*
+```
+
+| Endpoint | Description |
+|----------|-------------|
+| `/actuator/health` | Application health |
+| `/actuator/info` | Application info |
+| `/actuator/metrics` | Application metrics |
+| `/actuator/env` | Environment properties |
+| `/actuator/beans` | All beans in context |
+| `/actuator/mappings` | Request mappings |
+| `/actuator/loggers` | Logger configuration |
+
+---
+
+## @Endpoint - Custom Endpoints
+
+### Basic Custom Endpoint
+
+```java
+@Component
+@Endpoint(id = "features")
+public class FeaturesEndpoint {
+
+    private final Map<String, Boolean> features = new ConcurrentHashMap<>();
+
+    @ReadOperation
+    public Map<String, Boolean> features() {
+        return features;
+    }
+
+    @ReadOperation
+    public Boolean feature(@Selector String name) {
+        return features.get(name);
+    }
+
+    @WriteOperation
+    public void configureFeature(@Selector String name, boolean enabled) {
+        features.put(name, enabled);
+    }
+
+    @DeleteOperation
+    public void deleteFeature(@Selector String name) {
+        features.remove(name);
+    }
+}
+```
+
+### Usage
+
+```bash
+# GET all features
+curl http://localhost:8080/actuator/features
+
+# GET specific feature
+curl http://localhost:8080/actuator/features/darkMode
+
+# POST to enable feature
+curl -X POST http://localhost:8080/actuator/features/darkMode \
+     -H "Content-Type: application/json" \
+     -d '{"enabled": true}'
+
+# DELETE feature
+curl -X DELETE http://localhost:8080/actuator/features/darkMode
+```
+
+### Web-Only Endpoint
+
+```java
+@Component
+@WebEndpoint(id = "web-features")  // Only exposed over HTTP
+public class WebFeaturesEndpoint {
+
+    @ReadOperation
+    public Map<String, Object> info() {
+        return Map.of("type", "web-only");
+    }
+}
+```
+
+### JMX-Only Endpoint
+
+```java
+@Component
+@JmxEndpoint(id = "jmx-features")  // Only exposed over JMX
+public class JmxFeaturesEndpoint {
+
+    @ReadOperation
+    public String info() {
+        return "JMX endpoint";
+    }
+}
+```
+
+---
+
+## Health Indicators
+
+### Custom Health Indicator
+
+```java
+@Component
+public class DatabaseHealthIndicator implements HealthIndicator {
+
+    private final DataSource dataSource;
+
+    @Override
+    public Health health() {
+        try (Connection conn = dataSource.getConnection()) {
+            if (conn.isValid(1)) {
+                return Health.up()
+                    .withDetail("database", "PostgreSQL")
+                    .withDetail("status", "connected")
+                    .build();
+            }
+        } catch (SQLException e) {
+            return Health.down()
+                .withDetail("error", e.getMessage())
+                .build();
+        }
+        return Health.unknown().build();
+    }
+}
+```
+
+### Reactive Health Indicator
+
+```java
+@Component
+public class ExternalApiHealthIndicator implements ReactiveHealthIndicator {
+
+    private final WebClient webClient;
+
+    @Override
+    public Mono<Health> health() {
+        return webClient.get()
+            .uri("/health")
+            .retrieve()
+            .bodyToMono(String.class)
+            .map(response -> Health.up()
+                .withDetail("api", "available")
+                .build())
+            .onErrorResume(ex -> Mono.just(Health.down()
+                .withDetail("error", ex.getMessage())
+                .build()));
+    }
+}
+```
+
+### Health Groups
+
+```properties
+# application.properties
+management.endpoint.health.group.readiness.include=db,redis
+management.endpoint.health.group.liveness.include=ping
+```
+
+---
+
+## Info Contributors
+
+### Custom Info Contributor
+
+```java
+@Component
+public class BuildInfoContributor implements InfoContributor {
+
+    @Override
+    public void contribute(Info.Builder builder) {
+        builder.withDetail("build", Map.of(
+            "artifact", "my-app",
+            "version", "1.0.0",
+            "timestamp", Instant.now().toString()
+        ));
+    }
+}
+```
+
+### Git Info
+
+```properties
+# application.properties
+management.info.git.mode=full
+```
+
+```java
+// Automatically populated from git.properties
+// Generated by git-commit-id-plugin
+```
+
+---
+
+## Micrometer Metrics
+
+### @Timed - Method Timing
+
+```java
+@Service
+public class UserService {
+
+    @Timed(
+        value = "user.find",
+        description = "Time to find user",
+        percentiles = { 0.5, 0.9, 0.99 }
+    )
+    public User findById(Long id) {
+        return userRepository.findById(id).orElseThrow();
+    }
+
+    @Timed(value = "user.create", histogram = true)
+    public User create(CreateUserRequest request) {
+        return userRepository.save(new User(request));
+    }
+}
+```
+
+### @Counted - Method Counting
+
+```java
+@Service
+public class OrderService {
+
+    @Counted(
+        value = "orders.created",
+        description = "Number of orders created"
+    )
+    public Order createOrder(CreateOrderRequest request) {
+        return orderRepository.save(new Order(request));
+    }
+
+    @Counted(value = "orders.cancelled")
+    public void cancelOrder(Long orderId) {
+        orderRepository.deleteById(orderId);
+    }
+}
+```
+
+### Enable Metrics Annotations
+
+```java
+@Configuration
+public class MetricsConfig {
+
+    @Bean
+    public TimedAspect timedAspect(MeterRegistry registry) {
+        return new TimedAspect(registry);
+    }
+
+    @Bean
+    public CountedAspect countedAspect(MeterRegistry registry) {
+        return new CountedAspect(registry);
+    }
+}
+```
+
+---
+
+## Programmatic Metrics
+
+### Counter
+
+```java
+@Service
+public class PaymentService {
+
+    private final Counter successCounter;
+    private final Counter failureCounter;
+
+    public PaymentService(MeterRegistry registry) {
+        this.successCounter = Counter.builder("payments.success")
+            .description("Successful payments")
+            .register(registry);
+
+        this.failureCounter = Counter.builder("payments.failure")
+            .description("Failed payments")
+            .register(registry);
+    }
+
+    public PaymentResult process(Payment payment) {
+        try {
+            PaymentResult result = gateway.charge(payment);
+            successCounter.increment();
+            return result;
+        } catch (PaymentException e) {
+            failureCounter.increment();
+            throw e;
+        }
+    }
+}
+```
+
+### Gauge
+
+```java
+@Component
+public class QueueMetrics {
+
+    public QueueMetrics(MeterRegistry registry, MessageQueue queue) {
+        Gauge.builder("queue.size", queue, MessageQueue::size)
+            .description("Current queue size")
+            .register(registry);
+
+        Gauge.builder("queue.capacity", queue, MessageQueue::remainingCapacity)
+            .description("Remaining queue capacity")
+            .register(registry);
+    }
+}
+```
+
+### Timer
+
+```java
+@Service
+public class ExternalApiClient {
+
+    private final Timer timer;
+
+    public ExternalApiClient(MeterRegistry registry) {
+        this.timer = Timer.builder("external.api.calls")
+            .description("External API call duration")
+            .publishPercentiles(0.5, 0.95, 0.99)
+            .register(registry);
+    }
+
+    public Response call(Request request) {
+        return timer.record(() -> httpClient.execute(request));
+    }
+}
+```
+
+### Distribution Summary
+
+```java
+@Service
+public class OrderMetrics {
+
+    private final DistributionSummary orderSummary;
+
+    public OrderMetrics(MeterRegistry registry) {
+        this.orderSummary = DistributionSummary.builder("order.value")
+            .description("Order value distribution")
+            .baseUnit("dollars")
+            .publishPercentiles(0.5, 0.9, 0.99)
+            .register(registry);
+    }
+
+    public void recordOrder(Order order) {
+        orderSummary.record(order.getTotal().doubleValue());
+    }
+}
+```
+
+---
+
+## Tags and Dimensions
+
+```java
+@Service
+public class RegionalPaymentService {
+
+    private final MeterRegistry registry;
+
+    public void process(Payment payment) {
+        Timer.builder("payment.processing")
+            .tag("region", payment.getRegion())
+            .tag("currency", payment.getCurrency())
+            .tag("method", payment.getMethod().name())
+            .register(registry)
+            .record(() -> processPayment(payment));
+    }
+}
+```
+
+---
+
+## Actuator Security
+
+```java
+@Configuration
+public class ActuatorSecurityConfig {
+
+    @Bean
+    public SecurityFilterChain actuatorSecurity(HttpSecurity http) throws Exception {
+        return http
+            .securityMatcher("/actuator/**")
+            .authorizeHttpRequests(auth -> auth
+                .requestMatchers("/actuator/health").permitAll()
+                .requestMatchers("/actuator/info").permitAll()
+                .requestMatchers("/actuator/**").hasRole("ADMIN")
+            )
+            .httpBasic(Customizer.withDefaults())
+            .build();
+    }
+}
+```
+
+---
+
+## Metrics Export
+
+### Prometheus
+
+```properties
+# application.properties
+management.endpoints.web.exposure.include=prometheus
+management.metrics.export.prometheus.enabled=true
+```
+
+```xml
+<dependency>
+    <groupId>io.micrometer</groupId>
+    <artifactId>micrometer-registry-prometheus</artifactId>
+</dependency>
+```
+
+### Datadog
+
+```properties
+management.metrics.export.datadog.api-key=${DATADOG_API_KEY}
+management.metrics.export.datadog.application-key=${DATADOG_APP_KEY}
+```
+
+---
+
+## Key Takeaways
+
+1. **@Endpoint** for custom actuator endpoints
+2. **@ReadOperation/@WriteOperation** for HTTP methods
+3. **HealthIndicator** for custom health checks
+4. **@Timed/@Counted** for declarative metrics
+5. **MeterRegistry** for programmatic metrics
+6. **Tags add dimensions** to metrics
+7. **Secure actuator endpoints** in production
+
+---
+
+*Next: [Obscure But Powerful](./22-obscure-powerful.md)*
